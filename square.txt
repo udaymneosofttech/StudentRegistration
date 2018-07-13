@@ -1,0 +1,146 @@
+///////////////////////////////////////////////////////////////////
+
+
+abstract class WorkflowScreen<D, out E> protected constructor(
+ 	//unique identifies this screen 
+	val key: String,
+
+	//stream of data to render the screen
+	val screenData: Observable<D>,
+
+	//callback methods (click handlers,etc.) handled by this screen
+	val eventHandler: E
+)
+
+////////////////////////////////////////////////////////////////////
+class LoginScreen(
+	errorMessage: Observable<String>,
+	eventHandler: Events
+):WorkflowScreen<String, Events>(KEY, errorMessage, eventHandler)
+
+companion object{
+  val KEY = LoginScreen.class.name
+}
+
+interface Events{
+    fun doLogin(event :SubmitLogin)
+}
+
+data class SubmitLogin(val username: String, val password: String)
+
+////////////////////////////////////////////////////////////////////
+class ConfirmChangeCardOnFileScreen(
+    screenData: Observable<ScreenData>,
+    eventHandler: Events
+): WorkflowScreen<ScreenData, Events>(KEY, screenData, eventHandler)
+
+companion object{
+    KEY = ConfirmChangeCardOnFileScreen.class.name
+}
+
+interface Events{
+    fun doNotChargeCardOnFile()
+    fun chargeCardOnFile(tenderAmount: Money, instrumentIndex: Int)
+}
+
+data class ScreenData(
+	val amountDue: Money,
+	val customerName: String,
+	val cardNameAndNumber: String,
+	val instrumentIndex: Int
+)
+
+/////////////////////////////////////////////////////////////////////
+
+class AuthViewFactory: AbstractViewFactory(asList(
+
+	bindLayout(LoginScreen.KEY, R.layout.login) { screen ->
+	  LoginCoordinator(screen as LoginScreen)
+	},
+	
+	bindLayout(AuthorizingScreen.KEY, R.layout.authorizing) { screen ->
+	  AuthorizingCoordinator(screen as AuthorizingScreen)
+	},
+
+	bindLayout(SecondFactorScreen.KEY, R.layout.second_factor) { screen ->
+	  SecondFactorCoordinator(screen as SecondFactorScreen)
+	}
+))
+
+////////////////////////////////////////////////////////////////////
+
+class LoginCordinator(private val screen: LoginScreen) : Coordinator(){
+
+    private var subscription = Subscriptions.unsubscribed()
+
+    override fun onAttach(view: View){
+	//initialize views, set listeners
+	val error = view.findViewById<View>(R.id.login_error_message) as TextView
+	val email = view.findViewById<View>(R.id.login_email) as TextView
+	val password = view.findViewById<View>(R.id.login_password) as TextView
+	val button = view.findViewById<View>(R.id.login_button) as Button
+
+	button.setOnClickListener{ _ ->
+	  val event = SubmitLogin(email.text.toString, password.text.toString)
+	  screen.eventHandler.login(event)
+	}
+
+	subscription = screen.screenData.subscribe{ error.text = it }
+    }
+
+    override fun onDetach(view: View?){
+        subscription.unsubscribe()
+    }
+}
+
+/////////////////////////////////////////////////////////////////
+
+class AuthWorkFlow(): WorkFlow<Unit, String>, LoginScreen.Events, SecondFactorScreen.Events{
+
+internal enum class State{
+  LOGIN_PROMPT, AUTHORIZING, SECOND_FACTOR_PROMPT, DONE 
+}
+
+init{
+  stateMachine = FiniteStateMachine(
+	onEntry(AUTHORIZING) { currentScreen.onNext(AuthorizingScreen.KEY) },
+	onEntry(SECOND_FACTOR_PROMPT) { currentScreen.onNext(SecondFactorScreen.KEY) },
+	transition(LOGIN_PROMPT, SubmitLogin::class, AUTHORIZING)
+	     .doAction{ doLogin(it) },
+	transition(AUTHORIZING, AuthResponse::class)
+	     .onlyIf { isLoginFailure(it) }
+	     .doAction { response -> 
+		val errorMessage = response.errorMessage
+		loginMessage.onNext(errorMessage)
+		}
+  )
+}
+
+    private val currentScreen = BehaviorSubject.create<String>()
+
+    private val loginMessage = BehaviorSubject.create("")
+    private val authorisingMessage = BehaviorSubject.create<String>()
+    private val secondFactorMessage = BehaviorSubject.create<String>()
+
+    override fun screen: Observable<WorkflowScreen<*,*> = 
+     currentScreen.map{ it ->
+       when (it) {
+	LoginScreen.KEY -> LoginScreen(loginMessage, this)
+	AuthorizingScreen.KEY -> AuthorisingScreen(authorisingMessage)
+	SecondFactorScreen.KEY -> SecondFactorScreen(secondFactorMessage, this)
+	else -> throw new IllegalArgumentException("Unknown key $it")
+       } 
+    }
+
+    override fun onLogin(event: LoginScreen.SubmitLogin){
+      stateMachine.onEvent(event)
+    }
+
+    override fun onSecondFactorAuthentication(event: SecondFactorScreen.SecondFactor){
+      stateMachine.onEvent(event)
+    }
+}
+
+////////////////////////////////////////////////////////////////
+
+
